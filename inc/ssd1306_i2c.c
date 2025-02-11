@@ -1,247 +1,175 @@
-#include <stdio.h>
-#include <string.h>
-#include <stdlib.h>
-#include <ctype.h>
-#include "pico/stdlib.h"
-#include "pico/binary_info.h"
-#include "hardware/i2c.h"
-#include "ssd1306_font.h"
 #include "ssd1306_i2c.h"
+#include "ssd1306_font.h"
 
-
-
-// Calcular quanto do buffer será destinado à área de renderização
-void calculate_render_area_buffer_length(struct render_area *area) {
-    area->buffer_length = (area->end_column - area->start_column + 1) * (area->end_page - area->start_page + 1);
+// Renomeando as funções com o prefixo "oled_"
+void oled_init(ssd1306_t *ssd, uint8_t width, uint8_t height, bool external_vcc, uint8_t address, i2c_inst_t *i2c) {
+  ssd->width = width;
+  ssd->height = height;
+  ssd->pages = height / 8U;
+  ssd->address = address;
+  ssd->i2c_port = i2c;
+  ssd->bufsize = ssd->pages * ssd->width + 1;
+  ssd->ram_buffer = calloc(ssd->bufsize, sizeof(uint8_t));
+  ssd->ram_buffer[0] = 0x40;
+  ssd->port_buffer[0] = 0x80;
 }
 
-// Processo de escrita do i2c espera um byte de controle, seguido por dados
-void ssd1306_send_command(uint8_t command) {
-    uint8_t buffer[2] = {0x80, command};
-    i2c_write_blocking(i2c1, ssd1306_i2c_address, buffer, 2, false);
+void oled_config(ssd1306_t *ssd) {
+  oled_command(ssd, SET_DISP | 0x00);
+  oled_command(ssd, SET_MEM_ADDR);
+  oled_command(ssd, 0x01);
+  oled_command(ssd, SET_DISP_START_LINE | 0x00);
+  oled_command(ssd, SET_SEG_REMAP | 0x01);
+  oled_command(ssd, SET_MUX_RATIO);
+  oled_command(ssd, HEIGHT - 1);
+  oled_command(ssd, SET_COM_OUT_DIR | 0x08);
+  oled_command(ssd, SET_DISP_OFFSET);
+  oled_command(ssd, 0x00);
+  oled_command(ssd, SET_COM_PIN_CFG);
+  oled_command(ssd, 0x12);
+  oled_command(ssd, SET_DISP_CLK_DIV);
+  oled_command(ssd, 0x80);
+  oled_command(ssd, SET_PRECHARGE);
+  oled_command(ssd, 0xF1);
+  oled_command(ssd, SET_VCOM_DESEL);
+  oled_command(ssd, 0x30);
+  oled_command(ssd, SET_CONTRAST);
+  oled_command(ssd, 0xFF);
+  oled_command(ssd, SET_ENTIRE_ON);
+  oled_command(ssd, SET_NORM_INV);
+  oled_command(ssd, SET_CHARGE_PUMP);
+  oled_command(ssd, 0x14);
+  oled_command(ssd, SET_DISP | 0x01);
 }
 
-// Envia uma lista de comandos ao hardware
-void ssd1306_send_command_list(uint8_t *ssd, int number) {
-    for (int i = 0; i < number; i++) {
-        ssd1306_send_command(ssd[i]);
-    }
-}
-
-// Copia buffer de referência num novo buffer, a fim de adicionar o byte de controle desde o início
-void ssd1306_send_buffer(uint8_t ssd[], int buffer_length) {
-    uint8_t *temp_buffer = malloc(buffer_length + 1);
-
-    temp_buffer[0] = 0x40;
-    memcpy(temp_buffer + 1, ssd, buffer_length);
-
-    i2c_write_blocking(i2c1, ssd1306_i2c_address, temp_buffer, buffer_length + 1, false);
-
-    free(temp_buffer);
-}
-
-// Cria a lista de comandos (com base nos endereços definidos em ssd1306_i2c.h) para a inicialização do display
-void ssd1306_init() {
-    uint8_t commands[] = {
-        ssd1306_set_display, ssd1306_set_memory_mode, 0x00,
-        ssd1306_set_display_start_line, ssd1306_set_segment_remap | 0x01, 
-        ssd1306_set_mux_ratio, ssd1306_height - 1,
-        ssd1306_set_common_output_direction | 0x08, ssd1306_set_display_offset,
-        0x00, ssd1306_set_common_pin_configuration,
-    
-#if ((ssd1306_width == 128) && (ssd1306_height == 32))
-    0x02,
-#elif ((ssd1306_width == 128) && (ssd1306_height == 64))
-    0x12,
-#else
-    0x02,
-#endif
-        ssd1306_set_display_clock_divide_ratio, 0x80, ssd1306_set_precharge,
-        0xF1, ssd1306_set_vcomh_deselect_level, 0x30, ssd1306_set_contrast,
-        0xFF, ssd1306_set_entire_on, ssd1306_set_normal_display,
-        ssd1306_set_charge_pump, 0x14, ssd1306_set_scroll | 0x00,
-        ssd1306_set_display | 0x01,
-    };
-
-    ssd1306_send_command_list(commands, count_of(commands));
-}
-
-// Cria a lista de comandos para configurar o scrolling
-void ssd1306_scroll(bool set) {
-    uint8_t commands[] = {
-        ssd1306_set_horizontal_scroll | 0x00, 0x00, 0x00, 0x00, 0x03,
-        0x00, 0xFF, ssd1306_set_scroll | (set ? 0x01 : 0)
-    };
-
-    ssd1306_send_command_list(commands, count_of(commands));
-}
-
-// Atualiza uma parte do display com uma área de renderização
-void render_on_display(uint8_t *ssd, struct render_area *area) {
-    uint8_t commands[] = {
-        ssd1306_set_column_address, area->start_column, area->end_column,
-        ssd1306_set_page_address, area->start_page, area->end_page
-    };
-
-    ssd1306_send_command_list(commands, count_of(commands));
-    ssd1306_send_buffer(ssd, area->buffer_length);
-}
-
-// Determina o pixel a ser aceso (no display) de acordo com a coordenada fornecida
-void ssd1306_set_pixel(uint8_t *ssd, int x, int y, bool set) {
-    assert(x >= 0 && x < ssd1306_width && y >= 0 && y < ssd1306_height);
-
-    const int bytes_per_row = ssd1306_width;
-
-    int byte_idx = (y / 8) * bytes_per_row + x;
-    uint8_t byte = ssd[byte_idx];
-
-    if (set) {
-        byte |= 1 << (y % 8);
-    }
-    else {
-        byte &= ~(1 << (y % 8));
-    }
-
-    ssd[byte_idx] = byte;
-}
-
-// Algoritmo de Bresenham básico
-void ssd1306_draw_line(uint8_t *ssd, int x_0, int y_0, int x_1, int y_1, bool set) {
-    int dx = abs(x_1 - x_0); // Deslocamentos
-    int dy = -abs(y_1 - y_0);
-    int sx = x_0 < x_1 ? 1 : -1; // Direção de avanço
-    int sy = y_0 < y_1 ? 1 : -1;
-    int error = dx + dy; // Erro acumulado
-    int error_2;
-
-    while (true) {
-        ssd1306_set_pixel(ssd, x_0, y_0, set); // Acende pixel no ponto atual
-        if (x_0 == x_1 && y_0 == y_1) {
-            break; // Verifica se o ponto final foi alcançado
-        }
-
-        error_2 = 2 * error; // Ajusta o erro acumulado
-
-        if (error_2 >= dy) {
-            error += dy;
-            x_0 += sx; // Avança na direção x
-        }
-        if (error_2 <= dx) {
-            error += dx;
-            y_0 += sy; // Avança na direção y
-        }
-    }
-}
-
-// Adquire os pixels para um caractere (de acordo com ssd1306_font.h)
-inline int ssd1306_get_font(uint8_t character)
-{
-  if (character >= 'A' && character <= 'Z') {
-    return character - 'A' + 1;
-  }
-  else if (character >= '0' && character <= '9') {
-    return character - '0' + 27;
-  }
-  else
-    return 0;
-}
-
-// Desenha um único caractere no display
-void ssd1306_draw_char(uint8_t *ssd, int16_t x, int16_t y, uint8_t character) {
-    if (x > ssd1306_width - 8 || y > ssd1306_height - 8) {
-        return;
-    }
-
-    y = y / 8;
-
-    character = toupper(character);
-    int idx = ssd1306_get_font(character);
-    int fb_idx = y * 128 + x;
-
-    for (int i = 0; i < 8; i++) {
-        ssd[fb_idx++] = font[idx * 8 + i];
-    }
-}
-
-// Desenha uma string, chamando a função de desenhar caractere várias vezes
-void ssd1306_draw_string(uint8_t *ssd, int16_t x, int16_t y, char *string) {
-    if (x > ssd1306_width - 8 || y > ssd1306_height - 8) {
-        return;
-    }
-
-    while (*string) {
-        ssd1306_draw_char(ssd, x, y, *string++);
-        x += 8;
-    }
-}
-
-// Comando de configuração com base na estrutura ssd1306_t
-void ssd1306_command(ssd1306_t *ssd, uint8_t command) {
+void oled_command(ssd1306_t *ssd, uint8_t command) {
   ssd->port_buffer[1] = command;
   i2c_write_blocking(
-	ssd->i2c_port, ssd->address, ssd->port_buffer, 2, false );
+    ssd->i2c_port,
+    ssd->address,
+    ssd->port_buffer,
+    2,
+    false
+  );
 }
 
-// Função de configuração do display para o caso do bitmap
-void ssd1306_config(ssd1306_t *ssd) {
-    ssd1306_command(ssd, ssd1306_set_display | 0x00);
-    ssd1306_command(ssd, ssd1306_set_memory_mode);
-    ssd1306_command(ssd, 0x01);
-    ssd1306_command(ssd, ssd1306_set_display_start_line | 0x00);
-    ssd1306_command(ssd, ssd1306_set_segment_remap | 0x01);
-    ssd1306_command(ssd, ssd1306_set_mux_ratio);
-    ssd1306_command(ssd, ssd1306_height - 1);
-    ssd1306_command(ssd, ssd1306_set_common_output_direction | 0x08);
-    ssd1306_command(ssd, ssd1306_set_display_offset);
-    ssd1306_command(ssd, 0x00);
-    ssd1306_command(ssd, ssd1306_set_common_pin_configuration);
-    ssd1306_command(ssd, 0x12);
-    ssd1306_command(ssd, ssd1306_set_display_clock_divide_ratio);
-    ssd1306_command(ssd, 0x80);
-    ssd1306_command(ssd, ssd1306_set_precharge);
-    ssd1306_command(ssd, 0xF1);
-    ssd1306_command(ssd, ssd1306_set_vcomh_deselect_level);
-    ssd1306_command(ssd, 0x30);
-    ssd1306_command(ssd, ssd1306_set_contrast);
-    ssd1306_command(ssd, 0xFF);
-    ssd1306_command(ssd, ssd1306_set_entire_on);
-    ssd1306_command(ssd, ssd1306_set_normal_display);
-    ssd1306_command(ssd, ssd1306_set_charge_pump);
-    ssd1306_command(ssd, 0x14);
-    ssd1306_command(ssd, ssd1306_set_display | 0x01);
+void oled_send_data(ssd1306_t *ssd) {
+  oled_command(ssd, SET_COL_ADDR);
+  oled_command(ssd, 0);
+  oled_command(ssd, ssd->width - 1);
+  oled_command(ssd, SET_PAGE_ADDR);
+  oled_command(ssd, 0);
+  oled_command(ssd, ssd->pages - 1);
+  i2c_write_blocking(
+    ssd->i2c_port,
+    ssd->address,
+    ssd->ram_buffer,
+    ssd->bufsize,
+    false
+  );
 }
 
-// Inicializa o display para o caso de exibição de bitmap
-void ssd1306_init_bm(ssd1306_t *ssd, uint8_t width, uint8_t height, bool external_vcc, uint8_t address, i2c_inst_t *i2c) {
-    ssd->width = width;
-    ssd->height = height;
-    ssd->pages = height / 8U;
-    ssd->address = address;
-    ssd->i2c_port = i2c;
-    ssd->bufsize = ssd->pages * ssd->width + 1;
-    ssd->ram_buffer = calloc(ssd->bufsize, sizeof(uint8_t));
-    ssd->ram_buffer[0] = 0x40;
-    ssd->port_buffer[0] = 0x80;
+void oled_pixel(ssd1306_t *ssd, uint8_t x, uint8_t y, bool value) {
+  uint16_t index = (y >> 3) + (x << 3) + 1;
+  uint8_t pixel = (y & 0b111);
+  if (value)
+    ssd->ram_buffer[index] |= (1 << pixel);
+  else
+    ssd->ram_buffer[index] &= ~(1 << pixel);
 }
 
-// Envia os dados ao display
-void ssd1306_send_data(ssd1306_t *ssd) {
-    ssd1306_command(ssd, ssd1306_set_column_address);
-    ssd1306_command(ssd, 0);
-    ssd1306_command(ssd, ssd->width - 1);
-    ssd1306_command(ssd, ssd1306_set_page_address);
-    ssd1306_command(ssd, 0);
-    ssd1306_command(ssd, ssd->pages - 1);
-    i2c_write_blocking(
-    ssd->i2c_port, ssd->address, ssd->ram_buffer, ssd->bufsize, false );
-}
-
-// Desenha o bitmap (a ser fornecido em display_oled.c) no display
-void ssd1306_draw_bitmap(ssd1306_t *ssd, const uint8_t *bitmap) {
-    for (int i = 0; i < ssd->bufsize - 1; i++) {
-        ssd->ram_buffer[i + 1] = bitmap[i];
-
-        ssd1306_send_data(ssd);
+void oled_fill(ssd1306_t *ssd, bool value) {
+    for (uint8_t y = 0; y < ssd->height; ++y) {
+        for (uint8_t x = 0; x < ssd->width; ++x) {
+            oled_pixel(ssd, x, y, value);
+        }
     }
+}
+
+void oled_rect(ssd1306_t *ssd, uint8_t top, uint8_t left, uint8_t width, uint8_t height, bool value, bool fill) {
+  for (uint8_t x = left; x < left + width; ++x) {
+    oled_pixel(ssd, x, top, value);
+    oled_pixel(ssd, x, top + height - 1, value);
+  }
+  for (uint8_t y = top; y < top + height; ++y) {
+    oled_pixel(ssd, left, y, value);
+    oled_pixel(ssd, left + width - 1, y, value);
+  }
+
+  if (fill) {
+    for (uint8_t x = left + 1; x < left + width - 1; ++x) {
+      for (uint8_t y = top + 1; y < top + height - 1; ++y) {
+        oled_pixel(ssd, x, y, value);
+      }
+    }
+  }
+}
+
+void oled_line(ssd1306_t *ssd, uint8_t x0, uint8_t y0, uint8_t x1, uint8_t y1, bool value) {
+    int dx = abs(x1 - x0);
+    int dy = abs(y1 - y0);
+
+    int sx = (x0 < x1) ? 1 : -1;
+    int sy = (y0 < y1) ? 1 : -1;
+
+    int err = dx - dy;
+
+    while (true) {
+        oled_pixel(ssd, x0, y0, value);
+        if (x0 == x1 && y0 == y1) break;
+
+        int e2 = err * 2;
+
+        if (e2 > -dy) {
+            err -= dy;
+            x0 += sx;
+        }
+
+        if (e2 < dx) {
+            err += dx;
+            y0 += sy;
+        }
+    }
+}
+
+void oled_hline(ssd1306_t *ssd, uint8_t x0, uint8_t x1, uint8_t y, bool value) {
+  for (uint8_t x = x0; x <= x1; ++x)
+    oled_pixel(ssd, x, y, value);
+}
+
+void oled_vline(ssd1306_t *ssd, uint8_t x, uint8_t y0, uint8_t y1, bool value) {
+  for (uint8_t y = y0; y <= y1; ++y)
+    oled_pixel(ssd, x, y, value);
+}
+
+void oled_draw_char(ssd1306_t *ssd, char c, uint8_t x, uint8_t y) {
+  uint16_t index = 0;
+  if (c >= 'A' && c <= 'Z') {
+    index = (c - 'A' + 11) * 8;
+  } else if (c >= '0' && c <= '9') {
+    index = (c - '0' + 1) * 8;
+  } else if (c >= 'a' && c <= 'z') {
+    index = (c - 'a' + 37) * 8;
+  }
+
+  for (uint8_t i = 0; i < 8; ++i) {
+    uint8_t line = font[index + i];
+    for (uint8_t j = 0; j < 8; ++j) {
+      oled_pixel(ssd, x + i, y + j, line & (1 << j));
+    }
+  }
+}
+
+void oled_draw_string(ssd1306_t *ssd, const char *str, uint8_t x, uint8_t y) {
+  while (*str) {
+    oled_draw_char(ssd, *str++, x, y);
+    x += 8;
+    if (x + 8 >= ssd->width) {
+      x = 0;
+      y += 8;
+    }
+    if (y + 8 >= ssd->height) {
+      break;
+    }
+  }
 }
